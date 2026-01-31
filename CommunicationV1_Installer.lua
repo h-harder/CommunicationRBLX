@@ -1,23 +1,17 @@
 --[[
-CommunicationV1 - First-Time Install (Roblox Studio Command Bar)
+CommunicationV1 - First-Time Install (Command Bar)
 
-Creates:
-ReplicatedStorage/CustomChat
-  - ModeratorUserId (IntValue) default 0 (blank)
-  - SendMessage (RemoteEvent)
-  - BroadcastMessage (RemoteEvent)
-  - ClearChat (RemoteEvent)
-  - DeleteMessages (RemoteEvent)
-  - LetterRenderer (ModuleScript)
+Includes:
+- CommunicationV1 chat UI + toggle + overlay config gate
+- Moderator commands
+- Message deletion
+- Letter rendering
+- Filtering pipeline:
+   (1) Roblox TextService filtering (recommended / broad coverage)
+   (2) Optional extra blocked terms module (blank by default) that masks with '#'
 
-ServerScriptService/CustomChatServer
-StarterPlayer/StarterPlayerScripts/CustomChatClient
-
-Moderator config:
-Set moderator ID here:
-ReplicatedStorage.CustomChat.ModeratorUserId.Value
-
-If ModeratorUserId is 0/invalid, chat is blocked by an overlay until "Check" confirms a valid ID.
+Set moderator ID:
+ReplicatedStorage.CustomChat.ModeratorUserId.Value  (IntValue)
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -26,9 +20,7 @@ local StarterPlayer = game:GetService("StarterPlayer")
 
 local function getOrCreate(parent, className, name)
 	local obj = parent:FindFirstChild(name)
-	if obj and obj.ClassName == className then
-		return obj
-	end
+	if obj and obj.ClassName == className then return obj end
 	if obj then obj:Destroy() end
 	obj = Instance.new(className)
 	obj.Name = name
@@ -36,34 +28,39 @@ local function getOrCreate(parent, className, name)
 	return obj
 end
 
--- Core folder + config
+-- ReplicatedStorage folder + remotes + config
 local customFolder = getOrCreate(ReplicatedStorage, "Folder", "CustomChat")
-
 local modIdVal = getOrCreate(customFolder, "IntValue", "ModeratorUserId")
-if typeof(modIdVal.Value) ~= "number" then
-	modIdVal.Value = 0
-end
--- If you want it ALWAYS blank on install, uncomment:
--- modIdVal.Value = 0
+modIdVal.Value = tonumber(modIdVal.Value) or 0 -- default blank
 
 getOrCreate(customFolder, "RemoteEvent", "SendMessage")
 getOrCreate(customFolder, "RemoteEvent", "BroadcastMessage")
 getOrCreate(customFolder, "RemoteEvent", "ClearChat")
 getOrCreate(customFolder, "RemoteEvent", "DeleteMessages")
 
--- Letter renderer
+-- Server-only extra blocked terms list (blank by default)
+local bannedModule = getOrCreate(ServerScriptService, "ModuleScript", "CommunicationV1_BannedTerms")
+bannedModule.Source = [[
+-- CommunicationV1_BannedTerms
+-- Add extra words/phrases you want to hard-mask with '#'.
+-- Keep it private on the server (this module lives in ServerScriptService).
+--
+-- Return a Lua array of strings:
+-- return {
+--   "word",
+--   "phrase here",
+-- }
+return {
+}
+]]
+
+-- Letter renderer (client)
 local letterModule = getOrCreate(customFolder, "ModuleScript", "LetterRenderer")
 letterModule.Source = [[
 local TweenService = game:GetService("TweenService")
 
 local LetterRenderer = {}
-
-local DEFAULTS = {
-	CharDelay = 0.014,
-	PunctuationDelay = 0.08,
-	MaxLength = 350,
-	FadeIn = true,
-}
+local DEFAULTS = { CharDelay = 0.014, PunctuationDelay = 0.08, MaxLength = 350, FadeIn = true }
 
 local function merge(opts)
 	local out = {}
@@ -85,9 +82,7 @@ function LetterRenderer.Render(gui, text, opts)
 
 	local o = merge(opts)
 	text = tostring(text or "")
-	if #text > o.MaxLength then
-		text = text:sub(1, o.MaxLength) .. "…"
-	end
+	if #text > o.MaxLength then text = text:sub(1, o.MaxLength) .. "…" end
 
 	gui.Text = ""
 	if o.FadeIn then
@@ -107,11 +102,13 @@ end
 return LetterRenderer
 ]]
 
--- Server script
+-- Server Script (filtering included)
 local serverScript = getOrCreate(ServerScriptService, "Script", "CustomChatServer")
 serverScript.Source = [[
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TextService = game:GetService("TextService")
+local ServerScriptService = game:GetService("ServerScriptService")
 
 local folder = ReplicatedStorage:WaitForChild("CustomChat")
 local ModeratorUserId = folder:WaitForChild("ModeratorUserId")
@@ -119,6 +116,8 @@ local SendMessage = folder:WaitForChild("SendMessage")
 local BroadcastMessage = folder:WaitForChild("BroadcastMessage")
 local ClearChat = folder:WaitForChild("ClearChat")
 local DeleteMessages = folder:WaitForChild("DeleteMessages")
+
+local BannedTerms = require(ServerScriptService:WaitForChild("CommunicationV1_BannedTerms"))
 
 local MAX_LEN = 200
 local RATE_LIMIT_SECONDS = 0.35
@@ -141,18 +140,7 @@ local removedUntil = {}   -- [userId] = os.time() or math.huge
 local history = {}
 local HISTORY_LIMIT = 250
 
--- Hook for YOUR censor system later (pass-through)
-local function ProcessOutgoingMessage(player, rawText)
-	return rawText
-end
-
-local function nowSec() return os.time() end
-
-local function nextMsgId()
-	msgCounter += 1
-	return msgCounter
-end
-
+-- === Filtering pipeline ===
 local function normalize(rawText)
 	rawText = tostring(rawText or "")
 	rawText = rawText:gsub("\r", " "):gsub("\n", " ")
@@ -160,6 +148,87 @@ local function normalize(rawText)
 	rawText = rawText:gsub("^%s+", ""):gsub("%s+$", "")
 	return rawText
 end
+
+local function maskWithHashes(s)
+	return string.rep("#", #s)
+end
+
+local function escapePattern(s)
+	return (s:gsub("([^%w])", "%%%1"))
+end
+
+-- Builds a loose pattern that matches letters with optional punctuation/spaces between them.
+-- Example term "bad word" will match "b a d   w-o_r d" etc.
+local function buildLoosePattern(term)
+	term = tostring(term or "")
+	term = term:gsub("^%s+", ""):gsub("%s+$", "")
+	if term == "" then return nil end
+
+	local chars = {}
+	for i = 1, #term do
+		local ch = term:sub(i, i)
+		if ch:match("%s") then
+			table.insert(chars, "%s+")
+		else
+			-- escape the single character
+			local esc = escapePattern(ch)
+			table.insert(chars, esc)
+		end
+	end
+
+	-- Allow separators between each character token
+	-- [%W_]* means any non-alphanumeric or underscore (covers most obfuscation separators)
+	local pattern = table.concat(chars, "[%W_]*")
+	return pattern
+end
+
+local function applyExtraBannedTerms(text)
+	if typeof(BannedTerms) ~= "table" or #BannedTerms == 0 then
+		return text
+	end
+
+	local out = text
+	local lowerOut = string.lower(out)
+
+	for _, term in ipairs(BannedTerms) do
+		if typeof(term) == "string" then
+			local t = term:lower():gsub("^%s+", ""):gsub("%s+$", "")
+			if t ~= "" and #t <= 60 then
+				-- quick skip: if the raw term isn't even in the lower string, still might be obfuscated,
+				-- so we also try loose pattern matching.
+				local patt = buildLoosePattern(t)
+				if patt then
+					out = out:gsub(patt, function(matched)
+						return maskWithHashes(matched)
+					end)
+				end
+			end
+		end
+	end
+
+	return out
+end
+
+local function robloxFilterForBroadcast(player, text)
+	-- Roblox filtering; typically returns # for blocked pieces.
+	local ok, filtered = pcall(function()
+		local fr = TextService:FilterStringAsync(text, player.UserId)
+		return fr:GetNonChatStringForBroadcastAsync()
+	end)
+	if ok and typeof(filtered) == "string" then
+		return filtered
+	end
+	-- If filter fails for any reason, fall back to original text
+	return text
+end
+
+-- Hook point if you want to add your own extra logic
+local function ProcessOutgoingMessage(player, rawText)
+	return rawText
+end
+
+local function nowSec() return os.time() end
+local function nextMsgId() msgCounter += 1; return msgCounter end
 
 local function splitTokens(s)
 	local t = {}
@@ -169,9 +238,7 @@ end
 
 local function addToHistory(entry)
 	table.insert(history, entry)
-	if #history > HISTORY_LIMIT then
-		table.remove(history, 1)
-	end
+	if #history > HISTORY_LIMIT then table.remove(history, 1) end
 end
 
 local function modId()
@@ -242,16 +309,10 @@ local function canChat(player)
 end
 
 local function handleCommands(player, msg)
-	-- Commands should NEVER show as regular messages.
-	-- If configured: only mod can run them, but non-mod attempts are suppressed.
-	-- If not configured: treat everything as a normal message (but canChat will block anyway).
-	if not isConfigured() then
-		return false
-	end
+	if not isConfigured() then return false end
 
 	local lower = string.lower(msg)
 
-	-- exact commands
 	if lower == CMD_CLEAR_ALL then
 		if not isMod(player) then return true end
 		ClearChat:FireAllClients()
@@ -342,11 +403,9 @@ local function handleCommands(player, msg)
 			return true
 		end
 
-		-- Get the remainder after "/msgdelete <player> "
 		local prefix = tokens[1] .. " " .. tokens[2] .. " "
 		local needle = msg:sub(#prefix + 1)
 		needle = normalize(needle)
-
 		if needle == "" then
 			systemToClient(player, "Usage: /msgdelete [player] [text in message]")
 			return true
@@ -379,7 +438,6 @@ end
 SendMessage.OnServerEvent:Connect(function(player, rawText)
 	if typeof(rawText) ~= "string" then return end
 
-	-- rate limit includes commands
 	local now = os.clock()
 	local last = lastSentAt[player.UserId]
 	if last and (now - last) < RATE_LIMIT_SECONDS then return end
@@ -388,10 +446,7 @@ SendMessage.OnServerEvent:Connect(function(player, rawText)
 	local msg = normalize(rawText)
 	if msg == "" then return end
 
-	-- suppress commands from appearing as chat
-	if handleCommands(player, msg) then
-		return
-	end
+	if handleCommands(player, msg) then return end
 
 	local ok, reason = canChat(player)
 	if not ok then
@@ -400,6 +455,16 @@ SendMessage.OnServerEvent:Connect(function(player, rawText)
 	end
 
 	msg = ProcessOutgoingMessage(player, msg)
+	msg = normalize(msg)
+	if msg == "" then return end
+
+	-- 1) Roblox platform filtering
+	msg = robloxFilterForBroadcast(player, msg)
+	msg = normalize(msg)
+	if msg == "" then return end
+
+	-- 2) Your extra terms masking (optional)
+	msg = applyExtraBannedTerms(msg)
 	msg = normalize(msg)
 	if msg == "" then return end
 
@@ -423,7 +488,7 @@ if not starterPlayerScripts then
 	starterPlayerScripts.Parent = StarterPlayer
 end
 
--- Client script
+-- Client Script (CommunicationV1 title + reduced spacing + overlay gate)
 local clientScript = getOrCreate(starterPlayerScripts, "LocalScript", "CustomChatClient")
 clientScript.Source = [[
 local Players = game:GetService("Players")
@@ -448,7 +513,7 @@ task.defer(function()
 	end)
 end)
 
--- Remove previous GUI if it exists (useful for test sessions)
+-- Remove previous GUI if it exists (useful in playtests)
 local pg = player:WaitForChild("PlayerGui")
 local old = pg:FindFirstChild("CustomChatGui")
 if old then old:Destroy() end
@@ -458,7 +523,6 @@ screenGui.Name = "CustomChatGui"
 screenGui.ResetOnSpawn = false
 screenGui.Parent = pg
 
--- Small floating "Chat" button (bottom-right)
 local openBtn = Instance.new("TextButton")
 openBtn.Name = "OpenChatButton"
 openBtn.AnchorPoint = Vector2.new(1, 1)
@@ -473,7 +537,6 @@ openBtn.BorderSizePixel = 0
 openBtn.Parent = screenGui
 Instance.new("UICorner", openBtn).CornerRadius = UDim.new(0, 10)
 
--- Chat panel
 local root = Instance.new("Frame")
 root.Name = "ChatPanel"
 root.AnchorPoint = Vector2.new(1, 1)
@@ -502,7 +565,6 @@ title.Text = "CommunicationV1"
 title.TextColor3 = Color3.fromRGB(240, 240, 245)
 title.Parent = root
 
--- Close button (plain letter X)
 local closeBtn = Instance.new("TextButton")
 closeBtn.Name = "CloseChatButton"
 closeBtn.AnchorPoint = Vector2.new(1, 0)
@@ -529,7 +591,7 @@ messages.CanvasSize = UDim2.new(0,0,0,0)
 messages.Parent = root
 
 local list = Instance.new("UIListLayout")
-list.Padding = UDim.new(0, 3) -- tighter spacing between messages
+list.Padding = UDim.new(0, 3)
 list.SortOrder = Enum.SortOrder.LayoutOrder
 list.Parent = messages
 
@@ -570,7 +632,7 @@ sendBtn.BorderSizePixel = 0
 sendBtn.Parent = inputBar
 Instance.new("UICorner", sendBtn).CornerRadius = UDim.new(0, 10)
 
--- Overlay that blocks chat until ModeratorUserId is set + verified by Check
+-- Overlay gate
 local overlay = Instance.new("Frame")
 overlay.Name = "ConfigOverlay"
 overlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
@@ -651,14 +713,11 @@ end
 local function addMessageLine(author, text, isSystem, msgId)
 	local line = Instance.new("Frame")
 	line.BackgroundTransparency = 1
-	line.Size = UDim2.new(1, 0, 0, 18) -- slightly tighter baseline
+	line.Size = UDim2.new(1, 0, 0, 18)
 	line.AutomaticSize = Enum.AutomaticSize.Y
 	line.Parent = messages
-
 	if msgId ~= nil then
-		pcall(function()
-			line:SetAttribute("MsgId", msgId)
-		end)
+		pcall(function() line:SetAttribute("MsgId", msgId) end)
 	end
 
 	local label = Instance.new("TextLabel")
@@ -677,12 +736,7 @@ local function addMessageLine(author, text, isSystem, msgId)
 	local full = prefix .. tostring(text or "")
 
 	task.spawn(function()
-		LetterRenderer.Render(label, full, {
-			CharDelay = 0.012,
-			PunctuationDelay = 0.08,
-			MaxLength = 350,
-			FadeIn = true,
-		})
+		LetterRenderer.Render(label, full, { CharDelay = 0.012, PunctuationDelay = 0.08, MaxLength = 350, FadeIn = true })
 	end)
 
 	scrollToBottom()
@@ -719,8 +773,6 @@ local function updateOverlayText()
 		"\n\nThen click Check."
 end
 
--- IMPORTANT: overlay only disappears after clicking Check successfully,
--- but it WILL reappear automatically if the value becomes 0/invalid again.
 local function evaluateConfigForAutoShowOnly()
 	local id = currentModId()
 	if not isValidUserId(id) then
@@ -734,20 +786,16 @@ checkBtn.MouseButton1Click:Connect(function()
 	if isValidUserId(id) then
 		setOverlayVisible(false)
 	else
-		-- Do nothing if still invalid (overlay stays)
 		updateOverlayText()
 	end
 end)
 
 ModeratorUserId.Changed:Connect(function()
-	-- If they remove it / set invalid, bring overlay back instantly.
-	-- If they set valid, it stays until Check is clicked.
 	evaluateConfigForAutoShowOnly()
 end)
 
 local function sendCurrent()
 	if overlay.Visible then return end
-
 	local msg = (textBox.Text or ""):gsub("^%s+", ""):gsub("%s+$", "")
 	if #msg == 0 then return end
 	textBox.Text = ""
@@ -770,27 +818,22 @@ end)
 DeleteMessages.OnClientEvent:Connect(function(idList)
 	if typeof(idList) ~= "table" then return end
 	local toDelete = {}
-	for _, id in ipairs(idList) do
-		toDelete[id] = true
-	end
+	for _, id in ipairs(idList) do toDelete[id] = true end
 
 	for _, child in ipairs(messages:GetChildren()) do
 		if child:IsA("Frame") then
 			local id = child:GetAttribute("MsgId")
-			if id and toDelete[id] then
-				child:Destroy()
-			end
+			if id and toDelete[id] then child:Destroy() end
 		end
 	end
 	scrollToBottom()
 end)
 
--- Start hidden by default; show overlay if needed
 hideChat()
 updateOverlayText()
 evaluateConfigForAutoShowOnly()
 ]]
 
-print("✅ CommunicationV1 installed.")
+print("✅ CommunicationV1 installed with Roblox TextService filtering + optional extra banned terms module.")
 print("Set moderator ID at: ReplicatedStorage.CustomChat.ModeratorUserId.Value")
-print("If it's 0/invalid, chat will be blocked by an overlay until Check confirms a valid ID.")
+print("Optional extra terms live in: ServerScriptService.CommunicationV1_BannedTerms")
