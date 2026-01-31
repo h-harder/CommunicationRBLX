@@ -1,4 +1,3 @@
-```md
 # CommunicationV1 (Custom Chat System for Roblox Studio)
 
 **CommunicationV1** is a lightweight custom chat system you can install into any Roblox experience using the **Studio Command Bar**. It creates a separate chat UI and message pipeline from Roblox’s default chat, and includes **moderator tooling** (mute, pause, delete messages, revoke/restore chat, clear chat).
@@ -240,5 +239,3 @@ In Studio Command Bar:
 ### I want to change the moderator later
 - Update `ModeratorUserId.Value`
 - Open chat and click **Check** to validate & unlock
-
----
