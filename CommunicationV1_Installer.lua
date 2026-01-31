@@ -1,11 +1,5 @@
--- CommunicationV1 FIRST-TIME INSTALL (creates everything fresh)
--- Creates:
--- - ReplicatedStorage/CustomChat (values + remotes)
--- - ServerScriptService/CustomChatServer
--- - ServerScriptService/CommunicationV1_CustomFilter (optional hook)
--- - StarterGui/CommunicationV1Gui (custom chat UI)
---
--- Safety note: This installer removes any prior CommunicationV1Gui + CustomChatServer it finds.
+-- CommunicationV1 FIRST-TIME INSTALL (single-button UI, no tiny blue fallback)
+-- This deletes any existing CommunicationV1 install pieces and recreates them fresh.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
@@ -21,57 +15,94 @@ local function getOrCreate(parent, className, name)
 	return obj
 end
 
--- Cleanup old install pieces (safe)
+-- ---------
+-- CLEANUP
+-- ---------
 do
-	local oldGui = StarterGui:FindFirstChild("CommunicationV1Gui")
-	if oldGui then oldGui:Destroy() end
+	local oldFolder = ReplicatedStorage:FindFirstChild("CustomChat")
+	if oldFolder then oldFolder:Destroy() end
+
 	local oldServer = ServerScriptService:FindFirstChild("CustomChatServer")
 	if oldServer then oldServer:Destroy() end
+
 	local oldHook = ServerScriptService:FindFirstChild("CommunicationV1_CustomFilter")
 	if oldHook then oldHook:Destroy() end
+
+	local oldGui = StarterGui:FindFirstChild("CommunicationV1Gui")
+	if oldGui then oldGui:Destroy() end
 end
 
--- ReplicatedStorage folder + values
-local folder = getOrCreate(ReplicatedStorage, "Folder", "CustomChat")
+-- -----------------------------
+-- ReplicatedStorage/CustomChat
+-- -----------------------------
+local folder = Instance.new("Folder")
+folder.Name = "CustomChat"
+folder.Parent = ReplicatedStorage
 
-local modId = getOrCreate(folder, "IntValue", "ModeratorUserId")
-modId.Value = 0 -- default blank; your UI overlay will require you to set it
+local ModeratorUserId = Instance.new("IntValue")
+ModeratorUserId.Name = "ModeratorUserId"
+ModeratorUserId.Value = 0 -- blank default
+ModeratorUserId.Parent = folder
 
-local robloxFilterEnabled = getOrCreate(folder, "BoolValue", "RobloxFilterEnabled")
-robloxFilterEnabled.Value = true
+local RobloxFilterEnabled = Instance.new("BoolValue")
+RobloxFilterEnabled.Name = "RobloxFilterEnabled"
+RobloxFilterEnabled.Value = true
+RobloxFilterEnabled.Parent = folder
 
-local bubbleEnabled = getOrCreate(folder, "BoolValue", "BubbleChatEnabled")
-bubbleEnabled.Value = true
+local BubbleChatEnabled = Instance.new("BoolValue")
+BubbleChatEnabled.Name = "BubbleChatEnabled"
+BubbleChatEnabled.Value = true
+BubbleChatEnabled.Parent = folder
 
-local bannedText = getOrCreate(folder, "StringValue", "BannedTermsText")
-if bannedText.Value == "" then
-	bannedText.Value = [[
+local BannedTermsText = Instance.new("StringValue")
+BannedTermsText.Name = "BannedTermsText"
+BannedTermsText.Value = [[
 # CommunicationV1 banned terms
 # One term or phrase per line
 # Comments start with #
-# Paste YOUR private list here.
+# Paste your list here
 ]]
-end
+BannedTermsText.Parent = folder
 
--- Remotes
-getOrCreate(folder, "RemoteEvent", "SendMessage")
-getOrCreate(folder, "RemoteEvent", "BroadcastMessage")
-getOrCreate(folder, "RemoteEvent", "ClearChat")
-getOrCreate(folder, "RemoteEvent", "DeleteMessages")
+local SendMessage = Instance.new("RemoteEvent")
+SendMessage.Name = "SendMessage"
+SendMessage.Parent = folder
 
--- Optional custom filter hook
-local hook = getOrCreate(ServerScriptService, "ModuleScript", "CommunicationV1_CustomFilter")
+local BroadcastMessage = Instance.new("RemoteEvent")
+BroadcastMessage.Name = "BroadcastMessage"
+BroadcastMessage.Parent = folder
+
+local ClearChat = Instance.new("RemoteEvent")
+ClearChat.Name = "ClearChat"
+ClearChat.Parent = folder
+
+local DeleteMessages = Instance.new("RemoteEvent")
+DeleteMessages.Name = "DeleteMessages"
+DeleteMessages.Parent = folder
+
+-- -----------------------------------------
+-- ServerScriptService/CommunicationV1 hook
+-- -----------------------------------------
+local hook = Instance.new("ModuleScript")
+hook.Name = "CommunicationV1_CustomFilter"
+hook.Parent = ServerScriptService
 hook.Source = [[
 -- OPTIONAL custom filter hook.
--- Return a function(text, speakerUserId) -> string
--- OR return a table with Apply(text, speakerUserId) -> string
+-- Return either:
+--   function(text, speakerUserId) -> string
+-- or:
+--   { Apply = function(text, speakerUserId) -> string }
 return function(text, speakerUserId)
 	return text
 end
 ]]
 
--- Server script
-local server = getOrCreate(ServerScriptService, "Script", "CustomChatServer")
+-- -----------------------------------------
+-- ServerScriptService/CustomChatServer
+-- -----------------------------------------
+local server = Instance.new("Script")
+server.Name = "CustomChatServer"
+server.Parent = ServerScriptService
 server.Source = [[
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -81,6 +112,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local Debris = game:GetService("Debris")
 
 local folder = ReplicatedStorage:WaitForChild("CustomChat")
+
 local ModeratorUserId = folder:WaitForChild("ModeratorUserId")
 local RobloxFilterEnabled = folder:WaitForChild("RobloxFilterEnabled")
 local BubbleChatEnabled = folder:WaitForChild("BubbleChatEnabled")
@@ -204,7 +236,7 @@ local function canChat(player)
 end
 
 -- ======================
--- Whole-word/phrase mask
+-- Whole-word/phrase banned list mask
 -- ======================
 local function parseBannedTerms()
 	local txt = tostring(BannedTermsText.Value or "")
@@ -229,8 +261,8 @@ local function buildWholeTermPattern(termLower)
 		table.insert(words, escapeLuaPattern(w))
 	end
 	if #words == 0 then return nil end
-	local core = table.concat(words, "[%s%p]+") -- allow punctuation between words in phrases
-	return "%f[%w]" .. core .. "%f[%W]"       -- boundaries: prevents matching inside other words
+	local core = table.concat(words, "[%s%p]+")
+	return "%f[%w]" .. core .. "%f[%W]"
 end
 
 local function applyBannedMask(text)
@@ -266,45 +298,50 @@ local function applyBannedMask(text)
 end
 
 -- ======================
--- Bubble chat (auto-size)
+-- Bubble chat (auto-sized)
 -- ======================
 local BUBBLE_FONT = Enum.Font.Gotham
 local BUBBLE_TEXT_SIZE = 14
 local BUBBLE_MAX_WIDTH = 260
-local BUBBLE_PAD_X = 18
-local BUBBLE_PAD_Y = 16
+local PAD_X = 18
+local PAD_Y = 16
 
-local function getHeadOrRoot(char)
+local function getAdornee(char)
 	if not char then return nil end
 	return char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
 end
 
-local function computeBubbleSize(text)
-	local boundedText = tostring(text or ""):sub(1, 140)
-	local bounds = TextService:GetTextSize(boundedText, BUBBLE_TEXT_SIZE, BUBBLE_FONT, Vector2.new(BUBBLE_MAX_WIDTH, 1000))
-	local w = math.clamp(bounds.X + BUBBLE_PAD_X, 120, BUBBLE_MAX_WIDTH + BUBBLE_PAD_X)
-	local h = math.clamp(bounds.Y + BUBBLE_PAD_Y, 34, 140)
-	return w, h, boundedText
+local function computeBubble(text)
+	local bubbleText = tostring(text or ""):sub(1, 140)
+	local ok, bounds = pcall(function()
+		return TextService:GetTextSize(bubbleText, BUBBLE_TEXT_SIZE, BUBBLE_FONT, Vector2.new(BUBBLE_MAX_WIDTH, 1000))
+	end)
+	if not ok then
+		return 220, 44, bubbleText
+	end
+	local w = math.clamp(bounds.X + PAD_X, 120, BUBBLE_MAX_WIDTH + PAD_X)
+	local h = math.clamp(bounds.Y + PAD_Y, 34, 140)
+	return w, h, bubbleText
 end
 
 local function showBubble(player, text)
 	if not BubbleChatEnabled.Value then return end
 	local char = player.Character
-	local adornee = getHeadOrRoot(char)
+	local adornee = getAdornee(char)
 	if not adornee then return end
 
 	local old = adornee:FindFirstChild("CommunicationV1Bubble")
 	if old then old:Destroy() end
 
-	local w, h, bubbleText = computeBubbleSize(text)
+	local w, h, bubbleText = computeBubble(text)
 
 	local gui = Instance.new("BillboardGui")
 	gui.Name = "CommunicationV1Bubble"
 	gui.Adornee = adornee
 	gui.Size = UDim2.fromOffset(w, h)
-	gui.StudsOffset = Vector3.new(0, 2.6, 0)
+	gui.StudsOffset = Vector3.new(0, 2.7, 0)
 	gui.AlwaysOnTop = true
-	gui.MaxDistance = 90
+	gui.MaxDistance = 100
 	gui.Parent = adornee
 
 	local frame = Instance.new("Frame")
@@ -349,7 +386,7 @@ local function showBubble(player, text)
 end
 
 -- ======================
--- Roblox official filtering
+-- Roblox official filtering (per-recipient)
 -- ======================
 local function sendFilteredToAll(sender, authorName, rawMsg, ts, msgId)
 	if not RobloxFilterEnabled.Value then
@@ -556,6 +593,7 @@ SendMessage.OnServerEvent:Connect(function(player, rawText)
 	local msg = normalize(rawText)
 	if msg == "" then return end
 
+	-- commands never show
 	if handleCommands(player, msg) then return end
 
 	local ok, reason = canChat(player)
@@ -564,7 +602,7 @@ SendMessage.OnServerEvent:Connect(function(player, rawText)
 		return
 	end
 
-	-- A) Custom hook
+	-- A) custom hook first
 	local filtered = msg
 	local okHook, result = pcall(function()
 		if typeof(CustomFilterModule) == "function" then
@@ -580,7 +618,7 @@ SendMessage.OnServerEvent:Connect(function(player, rawText)
 	filtered = normalize(filtered)
 	if filtered == "" then return end
 
-	-- B) Banned list mask (whole word/phrase)
+	-- B) banned list mask
 	filtered = applyBannedMask(filtered)
 	filtered = normalize(filtered)
 	if filtered == "" then return end
@@ -596,12 +634,18 @@ end)
 print("✅ CommunicationV1 server installed.")
 ]]
 
--- Client UI
-local gui = getOrCreate(StarterGui, "ScreenGui", "CommunicationV1Gui")
+-- -----------------------------
+-- StarterGui/CommunicationV1Gui
+-- -----------------------------
+local gui = Instance.new("ScreenGui")
+gui.Name = "CommunicationV1Gui"
 gui.ResetOnSpawn = false
 gui.IgnoreGuiInset = true
+gui.Parent = StarterGui
 
-local client = getOrCreate(gui, "LocalScript", "CommunicationV1Client")
+local client = Instance.new("LocalScript")
+client.Name = "CommunicationV1Client"
+client.Parent = gui
 client.Source = [[
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -613,12 +657,10 @@ local SendMessage = folder:WaitForChild("SendMessage")
 local BroadcastMessage = folder:WaitForChild("BroadcastMessage")
 local ClearChat = folder:WaitForChild("ClearChat")
 local DeleteMessages = folder:WaitForChild("DeleteMessages")
-
 local ModeratorUserId = folder:WaitForChild("ModeratorUserId")
 
 local screenGui = script.Parent
 
--- Build UI
 local function new(className, props, parent)
 	local o = Instance.new(className)
 	for k,v in pairs(props or {}) do o[k] = v end
@@ -626,33 +668,36 @@ local function new(className, props, parent)
 	return o
 end
 
-local rootButton = new("TextButton", {
-	Name = "OpenButton",
+-- ONE opener button (nice-looking, not tiny blue)
+local openBtn = new("TextButton", {
+	Name = "OpenChatButton",
 	AnchorPoint = Vector2.new(1,1),
-	Position = UDim2.new(1, -18, 1, -90),
-	Size = UDim2.new(0, 44, 0, 26),
-	Text = "Chat",
+	Position = UDim2.new(1, -18, 1, -22),
+	Size = UDim2.new(0, 150, 0, 36),
+	Text = "CommunicationV1",
 	Font = Enum.Font.GothamBold,
-	TextSize = 12,
-	TextColor3 = Color3.fromRGB(255,255,255),
-	BackgroundColor3 = Color3.fromRGB(11, 92, 171),
+	TextSize = 13,
+	TextColor3 = Color3.fromRGB(245,245,250),
+	BackgroundColor3 = Color3.fromRGB(28,28,34),
 	AutoButtonColor = true,
 }, screenGui)
-new("UICorner", {CornerRadius = UDim.new(0, 8)}, rootButton)
+new("UICorner", {CornerRadius = UDim.new(0, 12)}, openBtn)
+new("UIStroke", {Thickness = 1, Transparency = 0.65}, openBtn)
 
+-- Panel
 local panel = new("Frame", {
 	Name = "Panel",
 	AnchorPoint = Vector2.new(1,1),
-	Position = UDim2.new(1, -18, 1, -18),
-	Size = UDim2.new(0, 330, 0, 300),
+	Position = UDim2.new(1, -18, 1, -68),
+	Size = UDim2.new(0, 350, 0, 320),
 	BackgroundColor3 = Color3.fromRGB(18,18,22),
-	BackgroundTransparency = 0.12,
+	BackgroundTransparency = 0.10,
 	Visible = false,
 }, screenGui)
-new("UICorner", {CornerRadius = UDim.new(0, 12)}, panel)
+new("UICorner", {CornerRadius = UDim.new(0, 14)}, panel)
 new("UIStroke", {Thickness = 1, Transparency = 0.65}, panel)
 
-local title = new("TextLabel", {
+new("TextLabel", {
 	Name = "Title",
 	Position = UDim2.new(0, 12, 0, 8),
 	Size = UDim2.new(1, -60, 0, 22),
@@ -688,7 +733,7 @@ local listFrame = new("ScrollingFrame", {
 	AutomaticCanvasSize = Enum.AutomaticSize.Y,
 }, panel)
 
-local layout = new("UIListLayout", {
+new("UIListLayout", {
 	Padding = UDim.new(0, 2),
 	SortOrder = Enum.SortOrder.LayoutOrder,
 }, listFrame)
@@ -719,7 +764,7 @@ local overlay = new("Frame", {
 local overlayCard = new("Frame", {
 	AnchorPoint = Vector2.new(0.5,0.5),
 	Position = UDim2.new(0.5,0,0.5,0),
-	Size = UDim2.new(0, 290, 0, 140),
+	Size = UDim2.new(0, 310, 0, 160),
 	BackgroundColor3 = Color3.fromRGB(18,18,22),
 	BackgroundTransparency = 0.06,
 }, overlay)
@@ -728,7 +773,7 @@ new("UIStroke", {Thickness=1, Transparency=0.65}, overlayCard)
 
 new("TextLabel", {
 	Position = UDim2.new(0, 12, 0, 10),
-	Size = UDim2.new(1, -24, 0, 68),
+	Size = UDim2.new(1, -24, 0, 96),
 	BackgroundTransparency = 1,
 	TextWrapped = true,
 	TextXAlignment = Enum.TextXAlignment.Left,
@@ -736,10 +781,11 @@ new("TextLabel", {
 	Font = Enum.Font.Gotham,
 	TextSize = 13,
 	TextColor3 = Color3.fromRGB(245,245,250),
-	Text = "Please enter moderator player ID at this portion of the code:\nReplicatedStorage.CustomChat.ModeratorUserId.Value",
+	Text = "Please enter moderator player ID at this portion of the code:\nReplicatedStorage.CustomChat.ModeratorUserId.Value\n\nThen click Check.",
 }, overlayCard)
 
 local checkBtn = new("TextButton", {
+	Name = "Check",
 	AnchorPoint = Vector2.new(1,1),
 	Position = UDim2.new(1, -12, 1, -12),
 	Size = UDim2.new(0, 90, 0, 30),
@@ -751,10 +797,14 @@ local checkBtn = new("TextButton", {
 }, overlayCard)
 new("UICorner", {CornerRadius = UDim.new(0, 10)}, checkBtn)
 
+local function overlayShouldShow()
+	return (tonumber(ModeratorUserId.Value) or 0) <= 0
+end
+
 local function refreshOverlay()
-	overlay.Visible = (tonumber(ModeratorUserId.Value) or 0) <= 0
-	input.Active = not overlay.Visible
+	overlay.Visible = overlayShouldShow()
 	input.TextEditable = not overlay.Visible
+	input.Active = not overlay.Visible
 end
 
 checkBtn.MouseButton1Click:Connect(function()
@@ -762,34 +812,36 @@ checkBtn.MouseButton1Click:Connect(function()
 end)
 
 ModeratorUserId.Changed:Connect(function()
-	-- overlay does NOT auto-dismiss unless user presses Check (per your requirement)
-	-- but it should re-appear if ID becomes blank
-	if (tonumber(ModeratorUserId.Value) or 0) <= 0 then
+	-- Overlay reappears automatically if ID becomes blank, but does not auto-dismiss.
+	if overlayShouldShow() then
 		overlay.Visible = true
 	end
 end)
 
 refreshOverlay()
 
--- Open/Close behavior
-local function open()
+local function openPanel()
 	panel.Visible = true
-	rootButton.Visible = false
+	openBtn.Visible = false
 	refreshOverlay()
 	task.wait()
-	if not overlay.Visible then input:CaptureFocus() end
+	if not overlay.Visible then
+		input:CaptureFocus()
+	end
 end
 
-local function close()
+local function closePanel()
 	panel.Visible = false
-	rootButton.Visible = true
+	openBtn.Visible = true
 end
 
-rootButton.MouseButton1Click:Connect(open)
-closeBtn.MouseButton1Click:Connect(close)
+openBtn.MouseButton1Click:Connect(openPanel)
+closeBtn.MouseButton1Click:Connect(closePanel)
 
--- Add message entry
-local function addLine(author, text)
+-- Message map for deletions
+local labelById = {}
+
+local function addLine(author, text, msgId)
 	local line = Instance.new("TextLabel")
 	line.BackgroundTransparency = 1
 	line.Size = UDim2.new(1, 0, 0, 18)
@@ -802,11 +854,11 @@ local function addLine(author, text)
 	line.TextColor3 = Color3.fromRGB(245,245,250)
 	line.Text = string.format("%s: %s", tostring(author), tostring(text))
 	line.Parent = listFrame
+	if msgId then labelById[msgId] = line end
 end
 
--- Receive messages
 BroadcastMessage.OnClientEvent:Connect(function(author, text, ts, msgId)
-	addLine(author, text)
+	addLine(author, text, msgId)
 	listFrame.CanvasPosition = Vector2.new(0, 10^7)
 end)
 
@@ -814,18 +866,23 @@ ClearChat.OnClientEvent:Connect(function()
 	for _, child in ipairs(listFrame:GetChildren()) do
 		if child:IsA("TextLabel") then child:Destroy() end
 	end
+	table.clear(labelById)
 end)
 
 DeleteMessages.OnClientEvent:Connect(function(ids)
-	-- Minimal implementation: just clears and relies on moderator commands for UI-level clearing.
-	-- You can enhance this by storing msgId->label mapping if you want perfect deletion UI.
+	if typeof(ids) ~= "table" then return end
+	for _, id in ipairs(ids) do
+		local label = labelById[id]
+		if label then
+			label:Destroy()
+			labelById[id] = nil
+		end
+	end
 end)
 
--- Send message
 local function send()
 	if overlay.Visible then return end
-	local text = input.Text
-	text = (text or ""):gsub("^%s+",""):gsub("%s+$","")
+	local text = (input.Text or ""):gsub("^%s+",""):gsub("%s+$","")
 	if text == "" then return end
 	input.Text = ""
 	SendMessage:FireServer(text)
@@ -835,16 +892,13 @@ input.FocusLost:Connect(function(enterPressed)
 	if enterPressed then send() end
 end)
 
--- Optional: Enter key if box is focused already
 UIS.InputBegan:Connect(function(io, gp)
 	if gp then return end
-	if io.KeyCode == Enum.KeyCode.Return then
-		if input:IsFocused() then
-			send()
-		end
+	if io.KeyCode == Enum.KeyCode.Return and input:IsFocused() then
+		send()
 	end
 end)
 ]]
 
-print("✅ CommunicationV1 installed.")
-print("Next: Set ReplicatedStorage.CustomChat.ModeratorUserId.Value to YOUR userId, then press Check in the overlay.")
+print("✅ CommunicationV1 FIRST-TIME install complete.")
+print("Next: Set ReplicatedStorage.CustomChat.ModeratorUserId.Value to your userId, open chat, then click Check.")
